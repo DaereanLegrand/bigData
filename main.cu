@@ -1,184 +1,141 @@
+#include <cstdio>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <cuda_runtime.h>
+#include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
+#include <thrust/sort.h>
 
-#define MAX_WORD_LENGTH 100
 #define HASH_TABLE_SIZE 10000000
-#define CHUNK_SIZE (1024 * 1024 * 1024)  // 1 GB chunks
-#define THREADS_PER_BLOCK 256
+#define CHUNK_SIZE (1024 * 1024 * 1024)
+#define MAX_WORD_LENGTH 100
 
-typedef struct {
+struct WordCount {
     char word[MAX_WORD_LENGTH];
     int count;
-} WordCount;
+};
 
-__device__ bool isAlphaDevice(char c) {
-    return ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
+void checkCudaErrors(cudaError_t err) {
+    if (err != cudaSuccess) {
+        printf("CUDA Error: %s\n", cudaGetErrorString(err));
+        exit(err);
+    }
 }
 
-__device__ char toLowerDevice(char c) {
-    if (c >= 'A' && c <= 'Z') {
-        return c + 32;
-    }
-    return c;
-}
-
-__device__ unsigned int hash(const char* word) {
-    unsigned int hash = 0;
-    for (int i = 0; word[i] != '\0'; i++) {
-        hash = 31 * hash + toLowerDevice(word[i]);
-    }
+__device__ unsigned int hash(const char* str) {
+    unsigned int hash = 5381;
+    int c;
+    while ((c = *str++))
+        hash = ((hash << 5) + hash) + c;
     return hash % HASH_TABLE_SIZE;
 }
 
-__global__ void countWords(char* text, int textLength, WordCount* wordCounts) {
+__device__ 
+bool is_alpha(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+__device__ 
+char to_lower(char c) {
+    return (c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c;
+}
+
+__device__ 
+void my_strcpy(char* dest, const char* src) {
+    while ((*dest++ = *src++) != '\0');
+}
+
+__global__ 
+void wordCounter(char* content, size_t size, WordCount* hashTable) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
 
-    for (int i = tid; i < textLength; i += stride) {
-        if (isAlphaDevice(text[i])) {
+    for (int i = tid; i < size; i += stride) {
+        if (is_alpha(content[i])) {
             char word[MAX_WORD_LENGTH] = {0};
             int wordLength = 0;
 
-            while (i < textLength && isAlphaDevice(text[i]) && wordLength < MAX_WORD_LENGTH - 1) {
-                word[wordLength++] = toLowerDevice(text[i++]);
+            while (i < size && is_alpha(content[i]) && wordLength < MAX_WORD_LENGTH - 1) {
+                word[wordLength++] = to_lower(content[i++]);
             }
 
             if (wordLength > 0) {
-                unsigned int index = hash(word);
-                atomicAdd(&wordCounts[index].count, 1);
-                
-                if (wordCounts[index].count == 1) {
-                    for (int j = 0; j < wordLength; j++) {
-                        wordCounts[index].word[j] = word[j];
-                    }
+                unsigned int hashValue = hash(word);
+                int index = atomicAdd(&hashTable[hashValue].count, 1);
+                if (index == 0) {
+                    my_strcpy(hashTable[hashValue].word, word);
                 }
             }
         }
     }
 }
 
-
-void processFileChunk(FILE* file, char* h_text, WordCount* h_wordCounts, cudaStream_t stream) {
-    size_t bytesRead = fread(h_text, 1, CHUNK_SIZE, file);
-    if (bytesRead == 0) {
-        printf("No bytes read or reached EOF.\n");
-        return;
-    }
-    printf("Bytes read from file: %zu\n", bytesRead);
-
-    char* d_text = NULL;
-    WordCount* d_wordCounts = NULL;
-
-    if (cudaMalloc(&d_text, bytesRead) != cudaSuccess) {
-        printf("Failed to allocate device memory for text.\n");
-        return;
-    }
-
-    if (cudaMalloc(&d_wordCounts, HASH_TABLE_SIZE * sizeof(WordCount)) != cudaSuccess) {
-        printf("Failed to allocate device memory for word counts.\n");
-        cudaFree(d_text);  // Free text memory before returning
-        return;
-    }
-
-    if (cudaMemcpyAsync(d_text, h_text, bytesRead, cudaMemcpyHostToDevice, stream) != cudaSuccess) {
-        printf("Failed to copy text to device.\n");
-        cudaFree(d_text);
-        cudaFree(d_wordCounts);
-        return;
-    }
-
-    if (cudaMemcpyAsync(d_wordCounts, h_wordCounts, HASH_TABLE_SIZE * sizeof(WordCount), cudaMemcpyHostToDevice, stream) != cudaSuccess) {
-        printf("Failed to copy word counts to device.\n");
-        cudaFree(d_text);
-        cudaFree(d_wordCounts);
-        return;
-    }
-
-    int numBlocks = (bytesRead + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-    countWords<<<numBlocks, THREADS_PER_BLOCK, 0, stream>>>(d_text, bytesRead, d_wordCounts);
-
-    if (cudaMemcpyAsync(h_wordCounts, d_wordCounts, HASH_TABLE_SIZE * sizeof(WordCount), cudaMemcpyDeviceToHost, stream) != cudaSuccess) {
-        printf("Failed to copy word counts back to host.\n");
-        cudaFree(d_text);
-        cudaFree(d_wordCounts);
-        return;
-    }
-
-    if (cudaStreamSynchronize(stream) != cudaSuccess) {
-        printf("Failed to synchronize CUDA stream.\n");
-        cudaFree(d_text);
-        cudaFree(d_wordCounts);
-        return;
-    }
-
-    cudaFree(d_text);  // Free GPU memory after use
-    cudaFree(d_wordCounts);
-}
-
-int compareWordCounts(const void* a, const void* b) {
-    return ((WordCount*)b)->count - ((WordCount*)a)->count;
-}
-
-int main(int argc, char** argv) {
+int main(int argc, char *argv[]) {
     if (argc != 2) {
         printf("Usage: %s <filename>\n", argv[0]);
-        return 1;
+        return -1;
     }
 
-    FILE* file = fopen(argv[1], "r");
-    if (!file) {
-        printf("Error opening file: %s\n", argv[1]);
-        return 1;
+    FILE *file = fopen(argv[1], "r");
+    if (file == NULL) {
+        perror("Error opening file");
+        return -1;
     }
-    printf("File opened successfully: %s\n", argv[1]);
 
-    WordCount* h_wordCounts = (WordCount*)calloc(HASH_TABLE_SIZE, sizeof(WordCount));
-    if (h_wordCounts == NULL) {
-        printf("Failed to allocate memory for word counts.\n");
+    fseek(file, 0, SEEK_END);
+    long fileSize = ftell(file);
+    rewind(file);
+
+    char *content = (char*)malloc((fileSize + 1) * sizeof(char));
+    if (content == NULL) {
+        perror("Memory allocation failed");
         fclose(file);
-        return 1;
+        return -1;
     }
 
-    char* h_text = (char*)malloc(CHUNK_SIZE);
-    if (h_text == NULL) {
-        printf("Failed to allocate memory for text chunk.\n");
-        free(h_wordCounts);
-        fclose(file);
-        return 1;
-    }
-
-    cudaStream_t stream;
-    if (cudaStreamCreate(&stream) != cudaSuccess) {
-        printf("Failed to create CUDA stream.\n");
-        free(h_text);
-        free(h_wordCounts);
-        fclose(file);
-        return 1;
-    }
-
-    while (!feof(file)) {
-        processFileChunk(file, h_text, h_wordCounts, stream);
-    }
-
+    size_t bytesRead = fread(content, sizeof(char), fileSize, file);
+    content[bytesRead] = '\0';
     fclose(file);
-    free(h_text);
 
-    // Sort results
-    printf("Sorting results...\n");
-    qsort(h_wordCounts, HASH_TABLE_SIZE, sizeof(WordCount), compareWordCounts);
+    printf("Total Bytes: %lu\n", bytesRead);
 
-    // Print top 100 words
-    printf("Printing top 100 words...\n");
-    for (int i = 0; i < 100 && h_wordCounts[i].count > 0; i++) {
+    WordCount* d_hashTable;
+    checkCudaErrors(cudaMalloc(&d_hashTable, HASH_TABLE_SIZE * sizeof(WordCount)));
+    checkCudaErrors(cudaMemset(d_hashTable, 0, HASH_TABLE_SIZE * sizeof(WordCount)));
+
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (bytesRead + threadsPerBlock - 1) / threadsPerBlock;
+
+    for (size_t offset = 0; offset < bytesRead; offset += CHUNK_SIZE) {
+        size_t chunkSize = (offset + CHUNK_SIZE > bytesRead) ? (bytesRead - offset) : CHUNK_SIZE;
+        char* d_content;
+        checkCudaErrors(cudaMalloc(&d_content, chunkSize));
+        checkCudaErrors(cudaMemcpy(d_content, content + offset, chunkSize, cudaMemcpyHostToDevice));
+
+        wordCounter<<<blocksPerGrid, threadsPerBlock>>>(d_content, chunkSize, d_hashTable);
+        checkCudaErrors(cudaDeviceSynchronize());
+
+        checkCudaErrors(cudaFree(d_content));
+    }
+
+    WordCount* h_hashTable = (WordCount*)malloc(HASH_TABLE_SIZE * sizeof(WordCount));
+    checkCudaErrors(cudaMemcpy(h_hashTable, d_hashTable, HASH_TABLE_SIZE * sizeof(WordCount), cudaMemcpyDeviceToHost));
+
+    thrust::device_vector<WordCount> d_wordCounts(h_hashTable, h_hashTable + HASH_TABLE_SIZE);
+    thrust::sort(d_wordCounts.begin(), d_wordCounts.end(),
+                 [] __device__ (const WordCount& a, const WordCount& b) { return a.count > b.count; });
+
+    thrust::host_vector<WordCount> h_wordCounts = d_wordCounts;
+
+    printf("Top 20 words:\n");
+    for (int i = 0; i < 20 && i < h_wordCounts.size() && h_wordCounts[i].count > 0; ++i) {
         printf("%s: %d\n", h_wordCounts[i].word, h_wordCounts[i].count);
     }
 
-    free(h_wordCounts);
-    cudaStreamDestroy(stream);
+    free(content);
+    free(h_hashTable);
+    checkCudaErrors(cudaFree(d_hashTable));
 
-    printf("Program completed successfully.\n");
     return 0;
 }
-

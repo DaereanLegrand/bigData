@@ -4,7 +4,7 @@
 #include <ctype.h>
 
 #define MAX_WORD_LENGTH 100
-#define HASH_TABLE_SIZE 10000000  // Adjust based on expected unique words
+#define HASH_TABLE_SIZE 10000000
 
 typedef struct WordNode {
     char word[MAX_WORD_LENGTH];
@@ -75,7 +75,6 @@ int main(int argc, char* argv[]) {
     processFile(argv[1]);
     printResults();
 
-    // Free allocated memory
     for (int i = 0; i < HASH_TABLE_SIZE; i++) {
         WordNode* current = hashTable[i];
         while (current != NULL) {

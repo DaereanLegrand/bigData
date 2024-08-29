@@ -1,5 +1,5 @@
 NVCC = nvcc
-NVCCFLAGS = -arch=sm_75
+NVCCFLAGS = -arch=sm_75 --extended-lambda
 CUDA_LIBS = -lcudart -lcublas -lcurand
 
 main:
