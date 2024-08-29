@@ -1,3 +1,4 @@
+#include <chrono>
 #include <cstdio>
 #include <stdio.h>
 #include <stdlib.h>
@@ -107,6 +108,7 @@ int main(int argc, char *argv[]) {
     int threadsPerBlock = 256;
     int blocksPerGrid = (bytesRead + threadsPerBlock - 1) / threadsPerBlock;
 
+    auto start = std::chrono::high_resolution_clock::now();
     for (size_t offset = 0; offset < bytesRead; offset += CHUNK_SIZE) {
         size_t chunkSize = (offset + CHUNK_SIZE > bytesRead) ? (bytesRead - offset) : CHUNK_SIZE;
         char* d_content;
@@ -119,6 +121,12 @@ int main(int argc, char *argv[]) {
         checkCudaErrors(cudaFree(d_content));
     }
 
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end - start;
+
+    printf("Elapsed time: %f seconds\n", elapsed.count());
+    printf("Ordering data...\n");
+
     WordCount* h_hashTable = (WordCount*)malloc(HASH_TABLE_SIZE * sizeof(WordCount));
     checkCudaErrors(cudaMemcpy(h_hashTable, d_hashTable, HASH_TABLE_SIZE * sizeof(WordCount), cudaMemcpyDeviceToHost));
 
@@ -128,8 +136,8 @@ int main(int argc, char *argv[]) {
 
     thrust::host_vector<WordCount> h_wordCounts = d_wordCounts;
 
-    printf("Top 20 words:\n");
-    for (int i = 0; i < 20 && i < h_wordCounts.size() && h_wordCounts[i].count > 0; ++i) {
+    printf("Top 50 words:\n");
+    for (int i = 0; i < 50 && i < h_wordCounts.size() && h_wordCounts[i].count > 0; ++i) {
         printf("%s: %d\n", h_wordCounts[i].word, h_wordCounts[i].count);
     }
 
