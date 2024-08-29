@@ -136,8 +136,9 @@ int main(int argc, char *argv[]) {
 
     thrust::host_vector<WordCount> h_wordCounts = d_wordCounts;
 
-    printf("Top 50 words:\n");
-    for (int i = 0; i < 50 && i < h_wordCounts.size() && h_wordCounts[i].count > 0; ++i) {
+    printf("Different words found: %d\n", (int)d_wordCounts.size());
+    printf("Top 1000 words:\n");
+    for (int i = 0; i < 1000 && i < h_wordCounts.size() && h_wordCounts[i].count > 0; ++i) {
         printf("%s: %d\n", h_wordCounts[i].word, h_wordCounts[i].count);
     }
 
